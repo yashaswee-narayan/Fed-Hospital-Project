@@ -7,14 +7,10 @@ Original file is located at
     https://colab.research.google.com/drive/1xgOAO0T0QKxKJM35LKOqAnkQXUakGHgU
 """
 
-# baseline_client.ipynb — add/replace with this cell (MLP + CNN local trainers)
+# baseline_client.ipynb
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from sklearn.metrics import log_loss
+import torch, torch.nn as nn, torch.optim as optim
 
-# ---- MLP for tabular data ----
 class TabularMLP(nn.Module):
     def __init__(self, in_features, hidden=128, num_classes=2):
         super().__init__()
@@ -29,26 +25,25 @@ class TabularMLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-def train_local_mlp(X_local, y_local, device='cpu', epochs=5, lr=1e-3, global_state=None, mu=0.0):
+def train_local_mlp(X_local, y_local, device='cpu', epochs=4, lr=1e-3, global_state=None, mu=0.0, batch_size=32):
     """
-    X_local: numpy array (n, d)
-    y_local: numpy array (n,)
-    returns: state_dict (numpy arrays), n_samples, avg_loss
+    Train MLP on local data.
+    Returns: state_dict (numpy arrays), n_samples, avg_loss
     """
     device = torch.device(device)
     X_t = torch.tensor(X_local, dtype=torch.float32)
     y_t = torch.tensor(y_local, dtype=torch.long)
     ds = torch.utils.data.TensorDataset(X_t, y_t)
-    loader = torch.utils.data.DataLoader(ds, batch_size=32, shuffle=True)
+    loader = torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=True)
 
-    model = TabularMLP(X_local.shape[1], hidden=128, num_classes=2).to(device)
+    model = TabularMLP(X_local.shape[1]).to(device)
     if global_state is not None:
-        # load global weights if provided (global_state keys -> numpy arrays)
-        model.load_state_dict({k: torch.tensor(v) for k,v in global_state.items()})
+        # load global_state: dict key->numpy array
+        sd = {k: torch.tensor(v).to(device) for k,v in global_state.items()}
+        model.load_state_dict(sd)
+
     opt = optim.Adam(model.parameters(), lr=lr)
     crit = nn.CrossEntropyLoss()
-
-    model.train()
     total_loss = 0.0; total_samples = 0
     for ep in range(epochs):
         for xb, yb in loader:
@@ -56,8 +51,8 @@ def train_local_mlp(X_local, y_local, device='cpu', epochs=5, lr=1e-3, global_st
             opt.zero_grad()
             out = model(xb)
             loss = crit(out, yb)
-            # FedProx proximal term (optional)
-            if global_state is not None and mu > 0.0:
+            # FedProx proximal term
+            if global_state is not None and mu > 0:
                 prox = 0.0
                 for name, p in model.named_parameters():
                     g = torch.tensor(global_state[name]).to(device)
@@ -67,11 +62,18 @@ def train_local_mlp(X_local, y_local, device='cpu', epochs=5, lr=1e-3, global_st
             opt.step()
             total_loss += loss.item() * xb.size(0)
             total_samples += xb.size(0)
-
     avg_loss = total_loss / max(1, total_samples)
     state = {k: v.cpu().detach().numpy() for k,v in model.state_dict().items()}
     return state, int(total_samples), float(avg_loss)
 
-# ---- keep or reuse SmallCNN defined earlier for images ----
-# ensure train_local_cnn uses the same state-dict format (numpy arrays)
+def eval_local_mlp(state_dict, X_eval, y_eval):
+    model = TabularMLP(X_eval.shape[1])
+    import torch
+    model.load_state_dict({k: torch.tensor(v) for k,v in state_dict.items()})
+    model.eval()
+    with torch.no_grad():
+        out = model(torch.tensor(X_eval, dtype=torch.float32))
+        preds = out.numpy().argmax(axis=1)
+    from sklearn.metrics import accuracy_score
+    return float(accuracy_score(y_eval, preds))
 
